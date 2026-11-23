@@ -86,8 +86,8 @@ async def main():
                     Actor.log.warning("Maximum cost per run reached; stopping.")
             elif not st["stop"]:
                 await Actor.push_data(it)
-        ybytes = v.yahoo.bytes if v.yahoo else 0
-        ycalls = v.yahoo.calls if v.yahoo else 0
+        ybytes = (v.yahoo.bytes if v.yahoo else 0) + (v.microsoft.bytes if v.microsoft else 0)
+        ycalls = (v.yahoo.calls if v.yahoo else 0) + (v.microsoft.calls if v.microsoft else 0)
         Actor.log.info(f"calls={v.smtp_conns + ycalls + v.dns.queries} bytes={v.smtp_bytes + ybytes} "
                        f"smtp_conns={v.smtp_conns} dns={v.dns.queries} yahoo={ycalls}")
         resumo = ", ".join(f"{k} {n}" for k, n in sorted(st["by"].items()))

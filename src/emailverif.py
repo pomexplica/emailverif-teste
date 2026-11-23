@@ -441,7 +441,7 @@ class Conversa:
             pass
 
 
-TEMP_REASONS = ("greylisted", "temporary_error", "too_many_recipients")
+TEMP_REASONS = ("greylisted", "temporary_error", "too_many_recipients", "smtp_timeout", "proxy_error")
 ENH_RE = re.compile(r"\b([245])\.(\d{1,3})\.(\d{1,3})\b")
 USER_RE = re.compile(r"(does not exist|doesn'?t exist|no such (user|mailbox|recipient|address)|user unknown|unknown user|"
                      r"unknown recipient|recipient (address )?rejected|address rejected|invalid (recipient|mailbox|address)|"
@@ -514,6 +514,7 @@ class Verifier:
         self.hold_temp = False    # True na 1ª volta: resposta temporária espera a nova tentativa
         self.http_proxy = None    # proxy HTTP(S)/SOCKS para a consulta do Yahoo
         self.yahoo = None
+        self.microsoft = None
 
     # ---- um e-mail sem SMTP
     def pre(self, raw):
@@ -629,7 +630,7 @@ class Verifier:
                 if erro is not None:
                     for it, t0 in lote:
                         self._smtp_fail(it, t0, erro)
-                        if isinstance(erro, SMTPError) and len(erro.args) > 1 and 400 <= (erro.args[1] or 0) < 500:
+                        if it["reason"] in TEMP_REASONS:
                             temp.append((it, t0))
                     continue
                 if precisa_catch:
@@ -660,9 +661,11 @@ class Verifier:
                         else:
                             for it2, t02 in resto:
                                 self._smtp_fail(it2, t02, e)
+                                if it2["reason"] in TEMP_REASONS:
+                                    temp.append((it2, t02))
                         break
                     self._smtp_result(it, t0, c, t, dom)
-                    if it["status"] == "unknown" and it["reason"] in ("greylisted", "temporary_error", "too_many_recipients"):
+                    if it["status"] == "unknown" and it["reason"] in TEMP_REASONS:
                         temp.append((it, t0))
                     if c == 421:
                         resto = lote[i + 1:]
@@ -693,6 +696,7 @@ class Verifier:
             it["_emitted"] = True
         it.pop("_retry_conn", None)
         it.pop("_pre_ms", None)
+        it.pop("_lookup", None)
         if self.emit:
             self.emit(it)
 
@@ -705,6 +709,8 @@ class Verifier:
             reason, rt = "smtp_unreachable", "The mail server refused the connection on port 25"
         elif isinstance(e, OSError) and not isinstance(e, SMTPError):
             reason, rt = "smtp_unreachable", f"Could not connect to the mail server on port 25 ({txt[:80]})"
+        elif txt.startswith("SOCKS5"):
+            reason, rt = "proxy_error", "The SMTP exit (proxy) failed to reach the mail server"
         elif code and 400 <= code < 500:
             reason, rt = "temporary_error", "The mail server asked to try again later"
         elif code and 500 <= code < 600:
@@ -720,7 +726,12 @@ class Verifier:
         it.update(smtpCode=code, smtpEnhancedCode=enh.group(0) if enh else None, smtpMessage=(text or "")[:200])
         ca = self.catch.get(dom)
         it["isCatchAll"] = ca
-        if kind == "accepted":
+        mx0 = (self.dns.cache.get(dom, ("", [""]))[1] or [""])[0]
+        if kind == "accepted" and str(mx0).endswith("olc.protection.outlook.com"):
+            it.update(status="unknown", reason="microsoft_unconfirmed",
+                      reasonText="Outlook.com/Hotmail accepted the address, but its server also accepts some addresses "
+                                 "that do not exist, so this is unconfirmed (the Microsoft account lookup was unavailable)")
+        elif kind == "accepted":
             if ca:
                 it.update(status="catch_all", reason="catch_all_domain",
                           reasonText="The server accepts any address on this domain, so this mailbox cannot be confirmed")
@@ -742,6 +753,8 @@ class Verifier:
                       reasonText="The mail server refused to answer for this address (anti-spam policy), so it is unconfirmed")
         elif kind == "temp":
             it.update(status="unknown", reason=reason, reasonText={
+                "smtp_timeout": "The mail server did not answer in time",
+                "proxy_error": "The SMTP exit (proxy) failed",
                 "greylisted": "Greylisted: the server asked to try again later",
                 "too_many_recipients": "The server limited recipients per connection",
                 "temporary_error": "Temporary error from the mail server"}[reason])
@@ -768,11 +781,36 @@ class Verifier:
                 temp += r
         return temp
 
+    def _lookup(self, lista, pend, fn, nome, nota, stop):
+        """Consulta por HTTPS (Yahoo, Microsoft). Sem resposta: o e-mail vai para o SMTP."""
+        for it, p in lista:
+            if stop and stop():
+                return
+            t0 = time.time()
+            ex, code = fn(it)
+            if ex is None:
+                it["_lookup"] = f"{nome}: {code}"
+                pend.append((it, p))
+                continue
+            it.update(smtpMessage=f"{nome} account lookup: {code or 'available'}")
+            if nome == "Yahoo":
+                it["isCatchAll"] = True
+            if ex:
+                if it["isRole"]:
+                    it.update(status="role", reason="role_address",
+                              reasonText=f"{nome} account exists, but it is a role/group address")
+                else:
+                    it.update(status="valid", reason="mailbox_exists", reasonText=f"{nome} says this account exists ({nota})")
+            else:
+                it.update(status="invalid", reason="mailbox_not_found", reasonText=f"{nome} says no account has this address ({nota})")
+            self._fim(it, t0 - it.get("_pre_ms", 0) / 1000)
+            self._emit(it)
+
     def verify_all(self, raws, greylist_wait=60, yahoo=True, stop=None):
         """Verifica a lista; cada resultado final sai por self.emit(it) assim que fica pronto.
         stop(): função que, se devolver True, interrompe (teto de custo)."""
         t_start = time.time()
-        pend, yah = [], []
+        pend, yah, ms = [], [], []
         for raw in raws:
             if stop and stop():
                 return
@@ -781,31 +819,18 @@ class Verifier:
                 self._emit(it)
             elif yahoo and it["domain"] == "yahoo.com":
                 yah.append((it, p))
+            elif yahoo and mx_group(p[1][0]) == "outlook.com":
+                ms.append((it, p))
             else:
                 pend.append((it, p))
         if yah:
             self.yahoo = self.yahoo or YahooAPI(proxy=self.http_proxy)
-            for it, p in yah:
-                if stop and stop():
-                    return
-                t0 = time.time()
-                ex, code = self.yahoo.exists(it["localPart"])
-                if ex is None:
-                    pend.append((it, p))      # sem resposta do Yahoo: vai pelo SMTP (que dá catch_all)
-                    continue
-                it.update(isCatchAll=True, smtpMessage=f"Yahoo account lookup: {code or 'available'}")
-                if ex:
-                    if it["isRole"]:
-                        it.update(status="role", reason="role_address",
-                                  reasonText="Yahoo account exists, but it is a role/group address")
-                    else:
-                        it.update(status="valid", reason="mailbox_exists",
-                                  reasonText="Yahoo says this account exists (Yahoo's SMTP accepts every address, so the account lookup decides)")
-                else:
-                    it.update(status="invalid", reason="mailbox_not_found",
-                              reasonText="Yahoo says no account has this username")
-                self._fim(it, t0)
-                self._emit(it)
+            self._lookup(yah, pend, lambda it: self.yahoo.exists(it["localPart"]), "Yahoo",
+                         "Yahoo's SMTP accepts every address, so the account lookup decides", stop)
+        if ms:
+            self.microsoft = self.microsoft or MicrosoftAPI(proxy=self.http_proxy)
+            self._lookup(ms, pend, lambda it: self.microsoft.exists(it["email"]), "Microsoft",
+                         "checked on the Microsoft sign-in lookup", stop)
         if stop and stop():
             return
         self.hold_temp = greylist_wait > 0
@@ -912,3 +937,63 @@ def forbidden_host():
     nomes.update(x.strip() for x in (os.environ.get("EMAILVERIF_FORBIDDEN_HOSTS") or "").split(",") if x.strip())
     h = socket.gethostname().lower()
     return h in nomes or socket.getfqdn().lower() in nomes or os.path.exists("/opt/money-video/ferramentas/pom-robos")
+
+
+# --- Microsoft (Outlook.com/Hotmail e Microsoft 365) --------------------------------------------------------
+# O SMTP do Outlook.com/Hotmail não é confiável para o "existe": em 23/11/2026 um endereço inventado
+# @outlook.com voltou "250 2.1.5 Recipient OK" (Actions, Azure) e outro @hotmail.com também (VPS), enquanto
+# outros inventados voltaram 550 5.5.0. O "não existe" (550) bateu sempre. A tela de login da Microsoft diz se
+# a conta existe: POST login.microsoftonline.com/common/GetCredentialType -> IfExistsResult
+# (0 = existe numa organização, 5/6 = existe como conta pessoal, 1 = não existe). Testado em 23/11/2026:
+# noahwang.wang@outlook.com 5, inventado @outlook.com 1, inventado @hotmail.com 1, decui@microsoft.com 0,
+# inventado @microsoft.com 1. DomainType 4 (domínio federado, com login em outro provedor) não decide.
+
+class MicrosoftAPI:
+    URL = "https://login.microsoftonline.com/common/GetCredentialType"
+
+    def __init__(self, proxy=None, pause=1.0):
+        self.proxy, self.pause = proxy, pause
+        self.s = None
+        self.calls = 0
+        self.bytes = 0
+        self.last = 0
+        self.fails = 0
+        self.lock = threading.Lock()
+
+    def exists(self, email):
+        """(True/False/None, nota)"""
+        with self.lock:
+            if self.fails >= 3:
+                return None, "microsoft_lookup_off"
+            try:
+                if self.s is None:
+                    from curl_cffi import requests
+                    self.s = requests.Session(impersonate="chrome", proxy=self.proxy) if self.proxy else requests.Session(impersonate="chrome")
+                espera = self.pause - (time.time() - self.last)
+                if espera > 0:
+                    time.sleep(espera)
+                r = self.s.post(self.URL, timeout=20, json={
+                    "username": email, "isOtherIdpSupported": True, "checkPhones": False, "isRemoteNGCSupported": True,
+                    "isCookieBannerShown": False, "isFidoSupported": True, "originalRequest": "", "forceotclogin": False,
+                    "isExternalFederationDisallowed": False, "isRemoteConnectSupported": False, "federationFlags": 0,
+                    "isSignup": False, "flowToken": "", "isAccessPassSupported": True})
+                self.last = time.time()
+                self.calls += 1
+                self.bytes += len(r.content)
+                d = r.json()
+            except Exception as e:
+                self.fails += 1
+                self.s = None
+                return None, f"microsoft_lookup_failed ({type(e).__name__})"
+            self.fails = 0
+            if d.get("ThrottleStatus") == 1:
+                return None, "microsoft_lookup_throttled"
+            dt = (d.get("EstsProperties") or {}).get("DomainType")
+            res = d.get("IfExistsResult")
+            if dt == 4 or d.get("Credentials", {}).get("FederationRedirectUrl"):
+                return None, "federated_domain"
+            if res in (0, 5, 6):
+                return True, f"IfExistsResult={res}"
+            if res == 1:
+                return False, "IfExistsResult=1"
+            return None, f"IfExistsResult={res}"
