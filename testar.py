@@ -21,7 +21,7 @@ def rodar(nome, entrada):
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp, "LANG": "C.UTF-8", "APIFY_LOCAL_STORAGE_DIR": tmp,
                "PYTHONPATH": os.path.join(AQUI, "src"), "PYTHONDONTWRITEBYTECODE": "1",
                "EMAILVERIF_HELO": os.environ.get("EMAILVERIF_HELO") or "srv2118426.hstgr.cloud"}
-        for k in ("EMAILVERIF_PROXY", "EMAILVERIF_HTTP_PROXY", "EMAILVERIF_MAX_CONN_PER_MIN", "EMAILVERIF_PREFER_IPV6", "EMAILVERIF_PROXY_GROUPS", "EMAILVERIF_ALLOW_DIRECT", "EMAILVERIF_FROM"):
+        for k in ("EMAILVERIF_PROXY", "EMAILVERIF_HTTP_PROXY", "EMAILVERIF_MAX_CONN_PER_MIN", "EMAILVERIF_PREFER_IPV6", "EMAILVERIF_PROXY_GROUPS", "EMAILVERIF_ALLOW_DIRECT", "EMAILVERIF_FROM", "EMAILVERIF_LOOKUPS"):
             if os.environ.get(k):
                 env[k] = os.environ[k]
         t0 = time.time()

@@ -786,5 +786,20 @@
    "mark-pk.tsai@mediatek.com",
    "zqcwzxwfbdf.naoexiste@mediatek.com"
   ]
+ },
+ "a3_m365_smtp": {
+  "emails": [
+   "m.hulsman@tudelft.nl",
+   "yangx.jy@fujitsu.com",
+   "dennis.dalessandro@cornelisnetworks.com",
+   "j.alglave@ucl.ac.uk",
+   "kotaranov@microsoft.com",
+   "decui@microsoft.com",
+   "weh@microsoft.com",
+   "zqprpcffeae.naoexiste@microsoft.com",
+   "noahwang.wang@outlook.com",
+   "zqrurrtvgft.naoexiste@outlook.com"
+  ],
+  "greylistRetrySeconds": 0
  }
 }

@@ -56,7 +56,8 @@ async def main():
 
         def work():
             try:
-                v.verify_all(emails, greylist_wait=wait if smtp else 0, stop=lambda: st["stop"])
+                v.verify_all(emails, greylist_wait=wait if smtp else 0, stop=lambda: st["stop"],
+                         yahoo=os.environ.get("EMAILVERIF_LOOKUPS", "1") != "0")
             except Exception as e:
                 Actor.log.exception(f"verifier crashed: {e}")
             finally:
@@ -72,8 +73,7 @@ async def main():
                     break
                 await asyncio.sleep(0)
                 continue
-            it.pop("_emitted", None)
-            it.pop("_retry_conn", None)
+            it = {k: v for k, v in it.items() if not k.startswith("_")}   # cópia: o verificador ainda usa as marcas
             st["n"] += 1
             st["by"][it["status"]] = st["by"].get(it["status"], 0) + 1
             # cobra só a resposta conclusiva: unknown e erro de sintaxe saem de graça

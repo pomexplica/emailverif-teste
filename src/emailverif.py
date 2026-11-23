@@ -449,6 +449,9 @@ USER_RE = re.compile(r"(does not exist|doesn'?t exist|no such (user|mailbox|reci
                      r"user not found|recipient not found|account (has been )?(disabled|deactivated|suspended)|"
                      r"no mailbox|undeliverable address|address unknown|unrouteable address|not our customer|"
                      r"doesn't have a .* account|nao existe|inexistente|usuario desconhecido)", re.I)
+SENDER_RE = re.compile(r"(sender address rejected|sender verify|domain of sender|sender domain|reverse dns|reverse hostname|"
+                       r"ip name lookup|no reverse|ptr record|helo command rejected|client host rejected|"
+                       r"connection rejected)", re.I)
 BLOCK_RE = re.compile(r"(spamhaus|blocked|blacklist|block ?list|dnsbl|\brbl\b|reputation|banned|policy|"
                       r"not allowed to send|client host|sender ip|your ip|access denied|too many|rate limit|"
                       r"temporarily (deferred|rejected)|authentication required|relay|ptr|reverse dns|helo)", re.I)
@@ -470,6 +473,9 @@ def classify(code, text):
         return "temp", "temporary_error"
     if 500 <= code < 600:
         t = text or ""
+        # problema com o remetente ou com o IP de saída (não com a caixa): 5.1.7, 5.1.8, rDNS, "sender verify"
+        if (enh_s in ("5.1.7", "5.1.8") or SENDER_RE.search(t)):
+            return "blocked", "smtp_blocked"
         # Microsoft 365 (DBEB): "550 5.4.1 Recipient address rejected: Access denied" = caixa não existe
         if enh_s and enh_s.startswith("5.1."):
             return "rejected", "mailbox_not_found"
@@ -487,6 +493,16 @@ def classify(code, text):
     return "ambiguous", "smtp_unexpected_reply"
 
 
+def _resolvable(name):
+    try:
+        r = dns.resolver.Resolver()
+        r.lifetime = 4
+        r.resolve(name, "A")
+        return True
+    except Exception:
+        return False
+
+
 class Verifier:
     def __init__(self, helo=None, mail_from=None, proxy=None, timeout=12.0, check_catch_all=True, smtp=True,
                  workers=8, ipv6=True, log=None, proxy_groups=None, allow_direct=False):
@@ -494,6 +510,12 @@ class Verifier:
         if "." not in self.helo or self.helo.endswith(".localdomain") or self.helo.endswith(".local"):
             self.helo = "mail.example.org" if not helo else helo
         self.mail_from = mail_from or os.environ.get("EMAILVERIF_FROM") or f"verify@{self.helo}"
+        if self.mail_from in ("<>", "null", "none"):
+            self.mail_from = ""
+        elif self.mail_from.endswith("@" + self.helo) and not _resolvable(self.helo):
+            # nome da máquina sem DNS público (ex.: executor do Actions): o remetente vazio (<>, o dos avisos
+            # de entrega) evita o "Sender address rejected: Domain not found" (kernel.org e outros, 23/11/2026)
+            self.mail_from = ""
         self.proxy = proxy
         self.proxy_groups = set(proxy_groups or [])   # vazio = o proxy serve todos os grupos
         self.allow_direct = allow_direct               # porta 25 direta: só onde for permitido (Actions)
