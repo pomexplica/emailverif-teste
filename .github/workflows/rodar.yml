@@ -19,7 +19,7 @@ jobs:
           echo "EMAILVERIF_HELO=${PTR:-$(hostname -f)}" >> $GITHUB_ENV
           (timeout 10 bash -c 'exec 3<>/dev/tcp/gmail-smtp-in.l.google.com/25 && head -c 60 <&3' && echo " porta25=ok") || echo "porta25=fechada"
       - name: rodar
-        env: { EMAILVERIF_ALLOW_DIRECT: "1", EMAILVERIF_MAX_CONN_PER_MIN: "30", TESTAR_PY: python }
+        env: { EMAILVERIF_ALLOW_DIRECT: "1", EMAILVERIF_MAX_CONN_PER_MIN: "30", TESTAR_PY: "${{ env.pythonLocation }}/bin/python" }
         run: python testar.py ${{ inputs.casos }}
       - name: cifrar resultado (repositório público)
         env: { K: "${{ secrets.RESULT_KEY }}" }
