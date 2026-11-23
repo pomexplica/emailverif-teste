@@ -494,8 +494,11 @@ def classify(code, text):
 
 
 def _resolvable(name):
+    """O nome resolve no DNS público? (o executor do Actions resolve o próprio nome *.internal.cloudapp.net no DNS
+    interno da Azure, mas os servidores de fora não: em 23/11/2026, 34 recusas '4.1.8 Sender address rejected')"""
     try:
-        r = dns.resolver.Resolver()
+        r = dns.resolver.Resolver(configure=False)
+        r.nameservers = ["1.1.1.1", "8.8.8.8"]
         r.lifetime = 4
         r.resolve(name, "A")
         return True
@@ -651,7 +654,7 @@ class Verifier:
                             break  # dois MX sem resposta: não insiste no terceiro
                 if erro is not None:
                     for it, t0 in lote:
-                        self._smtp_fail(it, t0, erro)
+                        self._smtp_fail(it, t0, erro, via_proxy=proxy is not None)
                         if it["reason"] in TEMP_REASONS:
                             temp.append((it, t0))
                     continue
@@ -682,7 +685,7 @@ class Verifier:
                             pend = resto + pend
                         else:
                             for it2, t02 in resto:
-                                self._smtp_fail(it2, t02, e)
+                                self._smtp_fail(it2, t02, e, via_proxy=proxy is not None)
                                 if it2["reason"] in TEMP_REASONS:
                                     temp.append((it2, t02))
                         break
@@ -693,7 +696,7 @@ class Verifier:
                         resto = lote[i + 1:]
                         for x in resto:
                             temp.append(x)
-                            self._smtp_fail(x[0], x[1], SMTPError(f"421 {t[:120]}", 421, t))
+                            self._smtp_fail(x[0], x[1], SMTPError(f"421 {t[:120]}", 421, t), via_proxy=proxy is not None)
                         break
                     time.sleep(PAUSA_RCPT)
                 try:
@@ -722,10 +725,12 @@ class Verifier:
         if self.emit:
             self.emit(it)
 
-    def _smtp_fail(self, it, t0, e):
+    def _smtp_fail(self, it, t0, e, via_proxy=False):
         txt = str(e.args[0]) if isinstance(e, SMTPError) and e.args else f"{type(e).__name__}: {e}"
         code = e.args[1] if isinstance(e, SMTPError) and len(e.args) > 1 else None
-        if isinstance(e, (socket.timeout, TimeoutError)):
+        if via_proxy and isinstance(e, OSError) and not isinstance(e, (socket.timeout, TimeoutError)):
+            reason, rt = "proxy_error", "The SMTP exit (proxy) dropped the connection"
+        elif isinstance(e, (socket.timeout, TimeoutError)):
             reason, rt = "smtp_timeout", "The mail server did not answer in time"
         elif isinstance(e, ConnectionRefusedError):
             reason, rt = "smtp_unreachable", "The mail server refused the connection on port 25"
@@ -969,6 +974,8 @@ def forbidden_host():
 # (0 = existe numa organização, 5/6 = existe como conta pessoal, 1 = não existe). Testado em 23/11/2026:
 # noahwang.wang@outlook.com 5, inventado @outlook.com 1, inventado @hotmail.com 1, decui@microsoft.com 0,
 # inventado @microsoft.com 1. DomainType 4 (domínio federado, com login em outro provedor) não decide.
+# O "1" só decide em domínio de conta pessoal (DomainType 2); em empresa (3), o endereço pode ser um apelido
+# que a consulta não vê, e quem decide é o SMTP (550 5.4.1 = não existe).
 
 class MicrosoftAPI:
     URL = "https://login.microsoftonline.com/common/GetCredentialType"
@@ -1016,6 +1023,10 @@ class MicrosoftAPI:
                 return None, "federated_domain"
             if res in (0, 5, 6):
                 return True, f"IfExistsResult={res}"
-            if res == 1:
+            if res == 1 and dt == 2:      # domínio de conta pessoal (outlook.com, hotmail...)
                 return False, "IfExistsResult=1"
+            if res == 1:
+                # domínio de empresa: a consulta só vê o nome de login, não os apelidos (aliases). Em 23/11/2026,
+                # j.alglave@ucl.ac.uk e dennis.dalessandro@cornelisnetworks.com deram 1 aqui e 250 no SMTP.
+                return None, "IfExistsResult=1 on a company domain (aliases are invisible to the lookup)"
             return None, f"IfExistsResult={res}"
