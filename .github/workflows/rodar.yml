@@ -1,0 +1,28 @@
+name: rodar
+on:
+  workflow_dispatch:
+    inputs:
+      casos: { description: "casos de casos.json, separados por espaço", default: "a1_microsoft" }
+jobs:
+  rodar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -q apify==4.3.0 dnspython curl_cffi==0.17.0
+      - name: saída e rDNS
+        run: |
+          IP=$(curl -s4 https://ifconfig.me); echo "IP=$IP"; curl -s https://ipinfo.io/$IP/org; echo
+          PTR=$(dig +short -x $IP | sed 's/\.$//' | head -1); echo "PTR=$PTR"
+          echo "EMAILVERIF_HELO=${PTR:-$(hostname -f)}" >> $GITHUB_ENV
+          (timeout 10 bash -c 'exec 3<>/dev/tcp/gmail-smtp-in.l.google.com/25 && head -c 60 <&3' && echo " porta25=ok") || echo "porta25=fechada"
+      - name: rodar
+        env: { EMAILVERIF_ALLOW_DIRECT: "1", EMAILVERIF_MAX_CONN_PER_MIN: "30", TESTAR_PY: python }
+        run: python testar.py ${{ inputs.casos }}
+      - name: cifrar resultado (repositório público)
+        env: { K: "${{ secrets.RESULT_KEY }}" }
+        run: tar czf - teste_*.json | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:K -out resultado.enc
+      - uses: actions/upload-artifact@v4
+        with: { name: resultado, path: resultado.enc }
